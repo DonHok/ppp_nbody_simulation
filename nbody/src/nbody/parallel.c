@@ -260,7 +260,6 @@ inline static void perform_simulation_naive(int n_steps, int imgStep, body *bodi
 
         propagate_positions_opt(xs, ys, bodies, self, n_bodies, sendcounts, displs, false, NULL);
     }
-
     finalize_computation(dbg, self, bodies, end_index_to_simulate, start_index_to_simulate, xs, ys, a_xs, a_ys,
                          sendcounts, displs, n_bodies, iterations_per_img, iterations);
 }
@@ -295,6 +294,8 @@ inline static void compute_inner_loop(body *bodies_i, body *bodies_j, const int 
  * The principle is similar to the previous simulation however the inner loop is split in 3 parts, with 2 loops
  * being the lower and bigger indices that are non local that are computed without newton. The middle loop uses Newton 3
  * and only does half the iterations.
+ * Can slightly deviate from the results of the single threaded implementation due to different order of computation leading to
+ * different rounding errors.
  */
 inline static void perform_simulation_local(int n_steps, int imgStep, body *bodies, int nBodies, bool debug,
                                             long double delta_t, int *sendcounts, int *displs, int self) {
@@ -468,8 +469,13 @@ inline static void perform_simulation_surrogate(int n_steps, int imgStep, body *
     int displs_surrogates[np];
 
     for (int i = 0; i < np; i++) {
-        displs_surrogates[i] = i;
-        sendcounts_surrogates[i] = 1;
+        if (i < n_bodies) {
+            displs_surrogates[i] = i;
+            sendcounts_surrogates[i] = 1;
+        } else {
+            displs_surrogates[i] = n_bodies;
+            sendcounts_surrogates[i] = 0;
+        }
     }
 
     init_accelerations(sendcounts[self], &a_xs, &a_ys);
@@ -521,7 +527,7 @@ inline static void perform_simulation_surrogate(int n_steps, int imgStep, body *
 }
 
 /* Allocate displacements and send counts for each process */
-inline static void alloc_sendcnts_displ(int np, int problem_size, int self, int **out_sendcts, int **out_displs) {
+inline static void alloc_sendcnts_displ(int np, int problem_size, int **out_sendcts, int **out_displs) {
     int *sendcnts = calloc(np, sizeof(int));
     int *displs = calloc(np, sizeof(int));
     if (sendcnts == NULL || displs == NULL) {
@@ -533,8 +539,8 @@ inline static void alloc_sendcnts_displ(int np, int problem_size, int self, int 
 
         int bodies_per_process = (problem_size / np);
         for (int i = 0; i < np; i++) {
-            sendcnts[i] = bodies_per_process + (self < problem_size % np ? 1 : 0);
-            displs[i] = i * bodies_per_process + (self > problem_size % np ? problem_size % np : self);
+            sendcnts[i] = bodies_per_process + (i < problem_size % np ? 1 : 0);
+            displs[i] = i * bodies_per_process + (i > problem_size % np ? problem_size % np : i);
         }
 
     } else {
@@ -578,7 +584,7 @@ void compute_parallel(struct TaskInput *TI) {
     }
 
     int *sendcnts, *displs;
-    alloc_sendcnts_displ(np, n_bodies, self, &sendcnts, &displs);
+    alloc_sendcnts_displ(np, n_bodies, &sendcnts, &displs);
     if (debug) {
         printf("Process #%d starts. Performs simulation for %d bodies. Displacement: %d.\n", self, sendcnts[self],
                displs[self]);
