@@ -78,8 +78,8 @@ inline static void compute_acceleration_opt(const body *bodies_i, const body *bo
     const long double eucl = sqrtl(delta_x * delta_x + delta_y * delta_y);
     // writing the statement explicit performs way faster
     long double r3 = eucl * eucl * eucl;
-    *ax = (delta_x / r3) * bodies_j[j].mass;
-    *ay = (delta_y / r3) * bodies_j[j].mass;
+    *ax = (delta_x / r3);
+    *ay = (delta_y / r3);
 }
 
 /* Update the postion of an body using the the accelerations axs, ays and the time frame deltaT */
@@ -247,8 +247,8 @@ inline static void perform_simulation_naive(int n_steps, int imgStep, body *bodi
                     continue;
                 long double ax, ay;
                 compute_acceleration_opt(bodies, bodies, i, j, &ax, &ay);
-                a_xs[idx] += ax;
-                a_ys[idx] += ay;
+                a_xs[idx] += ax * bodies[j].mass;
+                a_ys[idx] += ay * bodies[j].mass;
             }
         }
 
@@ -283,21 +283,11 @@ inline static void compute_inner_loop(body *bodies_i, body *bodies_j, const int 
     for (int j = start; j < end; ++j) {
         long double ax, ay;
         compute_acceleration_opt(bodies_i, bodies_j, i, j, &ax, &ay);
-        xbuff_i += ax;
-        ybuff_i += ay;
+        xbuff_i += ax * bodies_j[j].mass;
+        ybuff_i += ay * bodies_j[j].mass;
     }
     a_xs[idx_i] += xbuff_i;
     a_ys[idx_i] += ybuff_i;
-}
-
-inline static long double *precompute_mass_ratios(body *bodies, const int n_bodies) {
-    long double *ratios = malloc(sizeof(long double) * n_bodies * n_bodies);
-    for (int i = 0; i< n_bodies; i++) {
-        for (int j = 0; j < n_bodies; j++) {
-            ratios[i * n_bodies + j] = -bodies[i].mass / bodies[j].mass;
-        }
-    }
-    return ratios;
 }
 
 /* Perform simulation using Newton 3 for local-local computation.
@@ -305,8 +295,7 @@ inline static long double *precompute_mass_ratios(body *bodies, const int n_bodi
  * being the lower and bigger indices that are non local that are computed without newton. The middle loop uses Newton 3
  * and only does half the iterations.
  * Can slightly deviate from the results of the single threaded implementation due to different order of computation leading to
- * different rounding errors.
- * Uses precomputed mass ratios to speed up the computation for a high number of calculations */
+ * different rounding errors.*/
 inline static void perform_simulation_local(int n_steps, int imgStep, body *bodies, int nBodies, bool debug,
                                             long double delta_t, int *sendcounts, int *displs, int self) {
     const int iterations = n_steps;
@@ -320,7 +309,6 @@ inline static void perform_simulation_local(int n_steps, int imgStep, body *bodi
     long double *a_ys;
     long double *xs = malloc(sizeof(long double) * n_bodies);
     long double *ys = malloc(sizeof(long double) * n_bodies);
-    long double *mass_ratios = precompute_mass_ratios(bodies, n_bodies);
 
     init_accelerations(sendcounts[self], &a_xs, &a_ys);
     initialize_position_buffer(start_index_to_simulate, end_index_to_simulate, xs, ys, bodies);
@@ -342,18 +330,18 @@ inline static void perform_simulation_local(int n_steps, int imgStep, body *bodi
 
             long double xbuff_i = 0;
             long double ybuff_i = 0;
+            // No schedule required
 #pragma omp parallel for reduction(+:xbuff_i) reduction(+:ybuff_i)
             for (int j = i; j < end_index_to_simulate - 1; ++j) {
                 long double ax, ay;
                 const int idx_j = j + 1 - start_index_to_simulate;
                 compute_acceleration_opt(bodies, bodies, i, j + 1, &ax, &ay);
-                xbuff_i += ax;
-                ybuff_i += ay;
-                long double ratio = mass_ratios[i * n_bodies + (j + 1)];
+                xbuff_i += ax * bodies[j + 1].mass;
+                ybuff_i += ay * bodies[j + 1].mass;
               /*  a_xs[idx_j] += -(bodies[i].mass / bodies[j + 1].mass) * ax;
                 a_ys[idx_j] += -(bodies[i].mass / bodies[j + 1].mass) * ay; */
-                a_xs[idx_j] += ratio * ax;
-                a_ys[idx_j] += ratio * ay;
+                a_xs[idx_j] -= ax * bodies[i].mass;;
+                a_ys[idx_j] -= ay * bodies[i].mass;;
             }
             a_xs[idx_i] += xbuff_i;
             a_ys[idx_i] += ybuff_i;
@@ -371,14 +359,12 @@ inline static void perform_simulation_local(int n_steps, int imgStep, body *bodi
 
     finalize_computation(dbg, self, bodies, end_index_to_simulate, start_index_to_simulate, xs, ys, a_xs, a_ys,
                          sendcounts, displs, n_bodies, iterations_per_img, iterations);
-    free(mass_ratios);
 }
 
 
 /* Perform simulation using global Newton 3. For each element in bodies only the acceleration for bodies with higher
  * indices is is directly computed(The other way round is computed with Newton).
- * The results are the summed up using MPI reduction.
- * Uses precomputed mass ratios to speed up the computation for a high number of calculations */
+ * The results are the summed up using MPI reduction. */
 inline static void perform_simulation_global(int n_steps, int imgStep, body *bodies, int nBodies, bool debug,
                                              long double delta_t, int *sendcounts, int *displs, int self) {
     const int iterations = n_steps;
@@ -392,7 +378,6 @@ inline static void perform_simulation_global(int n_steps, int imgStep, body *bod
     long double *a_ys;
     long double *xs = malloc(sizeof(long double) * n_bodies);
     long double *ys = malloc(sizeof(long double) * n_bodies);
-    long double *mass_ratios = precompute_mass_ratios(bodies, n_bodies);
 
     init_accelerations(n_bodies, &a_xs, &a_ys);
     initialize_position_buffer(start_index_to_simulate, end_index_to_simulate, xs, ys, bodies);
@@ -407,17 +392,17 @@ inline static void perform_simulation_global(int n_steps, int imgStep, body *bod
             long double xbuff_i = 0;
             long double ybuff_i = 0;
 
+
 #pragma omp parallel for reduction(+:xbuff_i) reduction(+:ybuff_i)
             for (int j = i + 1; j < n_bodies; ++j) {
                 long double ax, ay;
                 compute_acceleration_opt(bodies, bodies, i, j, &ax, &ay);
-                xbuff_i += ax;
-                ybuff_i += ay;
-                long double ratio = mass_ratios[i * n_bodies + j];
+                xbuff_i += ax * bodies[j].mass;
+                ybuff_i += ay * bodies[j].mass;
               /*  a_xs[j] += -(bodies[i].mass / bodies[j].mass) * ax;
                 a_ys[j] += -(bodies[i].mass / bodies[j].mass) * ay; */
-                a_xs[j] += ratio * ax;
-                a_ys[j] += ratio * ay;
+                a_xs[j] -= bodies[i].mass * ax;
+                a_ys[j] -= bodies[i].mass * ay;
             }
 
             a_xs[i] += xbuff_i;
@@ -437,7 +422,6 @@ inline static void perform_simulation_global(int n_steps, int imgStep, body *bod
 
     finalize_computation(dbg, self, bodies, end_index_to_simulate, start_index_to_simulate, xs, ys, a_xs, a_ys,
                          sendcounts, displs, n_bodies, iterations_per_img, iterations);
-    free(mass_ratios);
 }
 
 /* Each process computes a surrogate body that represents its own bodies as a new body that has the sum of the mass
@@ -471,8 +455,7 @@ inline static void compute_surrogates(body *bodies, body *surrogates, const int 
  * Local newton is similar to the other implementation, however for non local computations the surrogates of the
  * other processes are used. Additionally this method distributes all information about the bodies after each iteration
  * because it can not be assumed that the bodies will always be assigned to the process that stores the information
- * about the velocity 
- * Does not use precomputed mass ratios because the order can chane */
+ * about the velocity  */
 inline static void perform_simulation_surrogate(int n_steps, int imgStep, body *bodies, int nBodies, bool debug,
                                                 long double delta_t, int *sendcounts, int *displs, int self, int np,
                                                 MPI_Datatype PPP_SURROGATE) {
@@ -525,10 +508,10 @@ inline static void perform_simulation_surrogate(int n_steps, int imgStep, body *
                 long double ax, ay;
                 const int idx_j = j + 1 - start_index_to_simulate;
                 compute_acceleration_opt(bodies, bodies, i, j + 1, &ax, &ay);
-                xbuff_i += ax;
-                ybuff_i += ay;
-                a_xs[idx_j] += -(bodies[i].mass / bodies[j + 1].mass) * ax;
-                a_ys[idx_j] += -(bodies[i].mass / bodies[j + 1].mass) * ay;
+                xbuff_i += ax * bodies[j + 1].mass;
+                ybuff_i += ay * bodies[j + 1].mass;
+                a_xs[idx_j] -= bodies[i].mass * ax;
+                a_ys[idx_j] -= bodies[i].mass * ay;
             }
             a_xs[idx_i] += xbuff_i;
             a_ys[idx_i] += ybuff_i;
@@ -591,7 +574,6 @@ void compute_parallel(struct TaskInput *TI) {
 #pragma omp parallel
         {
 #pragma omp single
-
             printf("Number of OMP threads in each MPI process: %d\n",
                    omp_get_num_threads());
         }
