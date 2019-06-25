@@ -93,20 +93,21 @@ inline static void update_position_opt(body *b, long double *xs, long double *ys
     b->vy += delta_vy;
 }
 
-/* Initialize a buffer for the accelerations to save intermediate results of the computations */
+/* Initialize a buffer for the accelerations to save intermediate results of the computations
+ * For ease of communication*/
 inline static void init_accelerations(int size, long double **axs, long double **ays) {
-    *axs = malloc(sizeof(long double) * size);
-    *ays = malloc(sizeof(long double) * size);
-    if (*(axs) == NULL || *(ays) == NULL) {
+    *axs = malloc(sizeof(long double) * size * 2);
+    if (*(axs) == NULL) {
         fprintf(stderr, "Error could not allocate memory for accelerations.\n");
         MPI_Abort(MPI_COMM_WORLD, -1);
     }
+    *ays = &((*axs)[size]);
 }
 
 /* Free the acceleration buffers */
 inline static void free_accelerations(long double *axs, long double *ays) {
     free(axs);
-    free(ays);
+//    free(ays);
 }
 
 /* Gather the x(xs) and y(ys) positions of bodies in all processes. */
@@ -265,11 +266,10 @@ inline static void perform_simulation_naive(int n_steps, int imgStep, body *bodi
 }
 
 /* Initialize acceleration buffers with 0s. This is required for instances where buffers are not traversed
- * in a linear fashion.*/
+ * in a linear fashion. a_xs and a_ys actually point to the same array*/
 inline static void c_initialize_accelerations(long double *a_xs, long double *a_ys, const int size) {
     // Actually works faster than filling using parallel loop
-    memset(a_xs, 0, sizeof(long double) * size);
-    memset(a_ys, 0, sizeof(long double) * size);
+    memset(a_xs, 0, sizeof(long double) * 2 * size);
 }
 
 /* Compute accelerations between local bodies and non local bodies. For reusability both can be stored in
@@ -409,8 +409,8 @@ inline static void perform_simulation_global(int n_steps, int imgStep, body *bod
             a_ys[i] += ybuff_i;
         }
 
-        MPI_Allreduce(MPI_IN_PLACE, a_xs, n_bodies, MPI_LONG_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-        MPI_Allreduce(MPI_IN_PLACE, a_ys, n_bodies, MPI_LONG_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        // a_xs points to array that also contains a_ys
+        MPI_Allreduce(MPI_IN_PLACE, a_xs, 2 *  n_bodies, MPI_LONG_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 
 #pragma omp parallel for
         for (int i = start_index_to_simulate; i < end_index_to_simulate; i++) {
