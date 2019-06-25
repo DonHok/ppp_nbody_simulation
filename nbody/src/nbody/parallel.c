@@ -94,7 +94,7 @@ inline static void update_position_opt(body *b, long double *xs, long double *ys
 }
 
 /* Initialize a buffer for the accelerations to save intermediate results of the computations
- * For ease of communication*/
+ * For ease of communication store both in the same array*/
 inline static void init_accelerations(int size, long double **axs, long double **ays) {
     *axs = malloc(sizeof(long double) * size * 2);
     if (*(axs) == NULL) {
