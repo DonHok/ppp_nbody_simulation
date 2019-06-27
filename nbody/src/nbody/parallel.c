@@ -76,7 +76,8 @@ inline static void compute_acceleration_opt(const body *bodies_i, const body *bo
     long double delta_x = bodies_j[j].x - bodies_i[i].x;
     long double delta_y = bodies_j[j].y - bodies_i[i].y;
     // writing the statement explicit performs way faster
-    long double r3 = ( delta_x * delta_x + delta_y * delta_y) * sqrtl( delta_x * delta_x + delta_y * delta_y);
+    const long double eucl= delta_x * delta_x + delta_y * delta_y;
+    long double r3 = eucl * sqrtl(eucl);
     *ax = (delta_x / r3);
     *ay = (delta_y / r3);
 }
@@ -276,17 +277,12 @@ inline static void c_initialize_accelerations(long double *a_xs, long double *a_
  * index of the local iteration.*/
 inline static void compute_inner_loop(body *bodies_i, body *bodies_j, const int i, const int start, const int end,
                                       long double *a_xs, long double *a_ys, const int idx_i) {
-    long double xbuff_i = 0;
-    long double ybuff_i = 0;
-#pragma omp parallel for reduction(+:xbuff_i) reduction(+:ybuff_i)
     for (int j = start; j < end; ++j) {
         long double ax, ay;
         compute_acceleration_opt(bodies_i, bodies_j, i, j, &ax, &ay);
-        xbuff_i += ax * bodies_j[j].mass;
-        ybuff_i += ay * bodies_j[j].mass;
+        a_xs[idx_i] += ax * bodies_j[j].mass;
+        a_ys[idx_i] += ay * bodies_j[j].mass;
     }
-    a_xs[idx_i] += xbuff_i;
-    a_ys[idx_i] += ybuff_i;
 }
 
 /* Perform simulation using Newton 3 for local-local computation.
@@ -296,28 +292,31 @@ inline static void compute_inner_loop(body *bodies_i, body *bodies_j, const int 
  * Can slightly deviate from the results of the single threaded implementation due to different order of computation leading to
  * different rounding errors.*/
 inline static void perform_simulation_local(int n_steps, int imgStep, body *bodies, int nBodies, bool debug,
-                                            long double delta_t, int *sendcounts, int *displs, int self) {
+                                            long double delta_t, int *sendcounts, int *displs, int self, const int n_omp_threads) {
     const int iterations = n_steps;
     const int iterations_per_img = imgStep;
     const bool dbg = debug;
     const int n_bodies = nBodies;
+    
+    const int n_to_simulate = sendcounts[self];
     const int start_index_to_simulate = displs[self];
-    const int end_index_to_simulate = displs[self] + sendcounts[self];
+    const int end_index_to_simulate = displs[self] + n_to_simulate;
     const long double g_delta = (G * delta_t);
     long double *a_xs;
     long double *a_ys;
     long double *xs = malloc(sizeof(long double) * n_bodies);
     long double *ys = malloc(sizeof(long double) * n_bodies);
-
-    init_accelerations(sendcounts[self], &a_xs, &a_ys);
+    
+    init_accelerations(n_to_simulate, &a_xs, &a_ys);
     initialize_position_buffer(start_index_to_simulate, end_index_to_simulate, xs, ys, bodies);
     dbg_print_start(dbg, self, start_index_to_simulate, end_index_to_simulate);
 
     for (int iteration = 0; iteration < iterations; ++iteration) {
         print_image(iterations_per_img, iteration, self, bodies, n_bodies);
 
-        c_initialize_accelerations(a_xs, a_ys, sendcounts[self]);
-
+        c_initialize_accelerations(a_xs, a_ys, n_to_simulate);
+//schedule(static,(n_to_simulate / n_omp_threads) * 2) for whatever reason changing the schedule decreases the performance by 50%
+#pragma omp parallel for reduction(+:a_xs[:n_to_simulate]) reduction(+:a_ys[:n_to_simulate])
         for (int i = start_index_to_simulate; i < end_index_to_simulate; ++i) {
             // As only buffer space required to calculate local accelerations is allocated
             // the indices need to shifted
@@ -327,23 +326,18 @@ inline static void perform_simulation_local(int n_steps, int imgStep, body *bodi
             // single loop
             compute_inner_loop(bodies, bodies, i, 0, start_index_to_simulate, a_xs, a_ys, idx_i);
 
-            long double xbuff_i = 0;
-            long double ybuff_i = 0;
             // No schedule required
-#pragma omp parallel for reduction(+:xbuff_i) reduction(+:ybuff_i)
             for (int j = i; j < end_index_to_simulate - 1; ++j) {
                 long double ax, ay;
                 const int idx_j = j + 1 - start_index_to_simulate;
                 compute_acceleration_opt(bodies, bodies, i, j + 1, &ax, &ay);
-                xbuff_i += ax * bodies[j + 1].mass;
-                ybuff_i += ay * bodies[j + 1].mass;
+                a_xs[idx_i] += ax * bodies[j + 1].mass;
+                a_ys[idx_i] += ay * bodies[j + 1].mass;
               /*  a_xs[idx_j] += -(bodies[i].mass / bodies[j + 1].mass) * ax;
                 a_ys[idx_j] += -(bodies[i].mass / bodies[j + 1].mass) * ay; */
                 a_xs[idx_j] -= ax * bodies[i].mass;;
                 a_ys[idx_j] -= ay * bodies[i].mass;;
             }
-            a_xs[idx_i] += xbuff_i;
-            a_ys[idx_i] += ybuff_i;
 
             compute_inner_loop(bodies, bodies, i, end_index_to_simulate, n_bodies, a_xs, a_ys, idx_i);
         }
@@ -365,7 +359,7 @@ inline static void perform_simulation_local(int n_steps, int imgStep, body *bodi
  * indices is is directly computed(The other way round is computed with Newton).
  * The results are the summed up using MPI reduction. */
 inline static void perform_simulation_global(int n_steps, int imgStep, body *bodies, int nBodies, bool debug,
-                                             long double delta_t, int *sendcounts, int *displs, int self) {
+                                             long double delta_t, int *sendcounts, int *displs, int self, const int n_omp_threads) {
     const int iterations = n_steps;
     const int iterations_per_img = imgStep;
     const bool dbg = debug;
@@ -387,25 +381,19 @@ inline static void perform_simulation_global(int n_steps, int imgStep, body *bod
 
         c_initialize_accelerations(a_xs, a_ys, n_bodies);
 
+// schedule(static,(n_bodies / n_omp_threads) * 2) scheduling also slightly decreases performance here 
+#pragma omp parallel for reduction(+:a_xs[:n_bodies]) reduction(+:a_ys[:n_bodies])
         for (int i = start_index_to_simulate; i < end_index_to_simulate; ++i) {
-            long double xbuff_i = 0;
-            long double ybuff_i = 0;
-
-
-#pragma omp parallel for reduction(+:xbuff_i) reduction(+:ybuff_i)
             for (int j = i + 1; j < n_bodies; ++j) {
                 long double ax, ay;
                 compute_acceleration_opt(bodies, bodies, i, j, &ax, &ay);
-                xbuff_i += ax * bodies[j].mass;
-                ybuff_i += ay * bodies[j].mass;
+                a_xs[i] += ax * bodies[j].mass;
+                a_ys[i] += ay * bodies[j].mass;
               /*  a_xs[j] += -(bodies[i].mass / bodies[j].mass) * ax;
                 a_ys[j] += -(bodies[i].mass / bodies[j].mass) * ay; */
                 a_xs[j] -= bodies[i].mass * ax;
                 a_ys[j] -= bodies[i].mass * ay;
             }
-
-            a_xs[i] += xbuff_i;
-            a_ys[i] += ybuff_i;
         }
 
         // a_xs points to array that also contains a_ys
@@ -462,8 +450,9 @@ inline static void perform_simulation_surrogate(int n_steps, int imgStep, body *
     const int iterations_per_img = imgStep;
     const bool dbg = debug;
     const int n_bodies = nBodies;
+    const int n_to_simulate = sendcounts[self];
     const int start_index_to_simulate = displs[self];
-    const int end_index_to_simulate = displs[self] + sendcounts[self];
+    const int end_index_to_simulate = displs[self] + n_to_simulate;
     const long double g_delta = (G * delta_t);
     long double *a_xs;
     long double *a_ys;
@@ -482,7 +471,7 @@ inline static void perform_simulation_surrogate(int n_steps, int imgStep, body *
         }
     }
 
-    init_accelerations(sendcounts[self], &a_xs, &a_ys);
+    init_accelerations(n_to_simulate, &a_xs, &a_ys);
     dbg_print_start(dbg, self, start_index_to_simulate, end_index_to_simulate);
 
     sort_bodies(bodies, n_bodies, NULL, NULL);
@@ -492,28 +481,25 @@ inline static void perform_simulation_surrogate(int n_steps, int imgStep, body *
 
         compute_surrogates(bodies, surrogates, sendcounts, displs, displs_surrogates, sendcounts_surrogates,
                            self, PPP_SURROGATE);
-        c_initialize_accelerations(a_xs, a_ys, sendcounts[self]);
+        c_initialize_accelerations(a_xs, a_ys, n_to_simulate);
 
+// changing scheduling is also not better here
+#pragma omp parallel for reduction(+:a_xs[:n_to_simulate]) reduction(+:a_ys[:n_to_simulate])
         for (int i = start_index_to_simulate; i < end_index_to_simulate; ++i) {
             const int idx_i = i - start_index_to_simulate;
 
             // Compute with surrogates
             compute_inner_loop(bodies, surrogates, i, 0, self < max_np ? self : 0, a_xs, a_ys, idx_i);
 
-            long double xbuff_i = 0;
-            long double ybuff_i = 0;
-#pragma omp parallel for reduction(+:xbuff_i) reduction(+:ybuff_i)
             for (int j = i; j < end_index_to_simulate - 1; ++j) {
                 long double ax, ay;
                 const int idx_j = j + 1 - start_index_to_simulate;
                 compute_acceleration_opt(bodies, bodies, i, j + 1, &ax, &ay);
-                xbuff_i += ax * bodies[j + 1].mass;
-                ybuff_i += ay * bodies[j + 1].mass;
+                a_xs[idx_i] += ax * bodies[j + 1].mass;
+                a_ys[idx_i] += ay * bodies[j + 1].mass;
                 a_xs[idx_j] -= bodies[i].mass * ax;
                 a_ys[idx_j] -= bodies[i].mass * ay;
             }
-            a_xs[idx_i] += xbuff_i;
-            a_ys[idx_i] += ybuff_i;
 
             compute_inner_loop(bodies, surrogates, i, self + 1 < max_np ? self + 1 : max_np, max_np, a_xs, a_ys, idx_i);
         }
@@ -563,7 +549,7 @@ inline static void alloc_sendcnts_displ(int np, int problem_size, int **out_send
 }
 
 void compute_parallel(struct TaskInput *TI) {
-    int np, self;
+    int np, self, n_omp_threads;
 
     MPI_Comm_size(MPI_COMM_WORLD, &np);
     MPI_Comm_rank(MPI_COMM_WORLD, &self);
@@ -578,6 +564,12 @@ void compute_parallel(struct TaskInput *TI) {
         }
     }
 
+#pragma omp parallel
+    {
+#pragma omp single
+            n_omp_threads = omp_get_num_threads();
+    }
+        
     const bool debug = TI->debug;
     const int n_bodies = TI->nBodies;
     body *all_bodies = TI->bodies;
@@ -594,10 +586,10 @@ void compute_parallel(struct TaskInput *TI) {
     }
     if (TI->newton3) {
         perform_simulation_global(TI->nSteps, TI->imageStep, all_bodies, n_bodies, debug, TI->deltaT,
-                                  sendcnts, displs, self);
+                                  sendcnts, displs, self, n_omp_threads);
     } else if (TI->newton3local) {
         perform_simulation_local(TI->nSteps, TI->imageStep, all_bodies, n_bodies, debug, TI->deltaT,
-                                 sendcnts, displs, self);
+                                 sendcnts, displs, self, n_omp_threads);
     } else if (TI->approxSurrogate) {
         MPI_Datatype PPP_SURROGATE;
         MPI_Type_contiguous(5, MPI_LONG_DOUBLE, &PPP_SURROGATE);
