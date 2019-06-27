@@ -550,11 +550,16 @@ inline static void alloc_sendcnts_displ(int np, int problem_size, int **out_send
 
 void compute_parallel(struct TaskInput *TI) {
     int np, self, n_omp_threads;
+    
+        
+    const bool debug = TI->debug;
+    const int n_bodies = TI->nBodies;
+    body *all_bodies = TI->bodies;
 
     MPI_Comm_size(MPI_COMM_WORLD, &np);
     MPI_Comm_rank(MPI_COMM_WORLD, &self);
 
-    if (self == 0) {
+    if (self == 0 && debug) {
         printf("Number of MPI processes: %d\n", np);
 #pragma omp parallel
         {
@@ -569,10 +574,6 @@ void compute_parallel(struct TaskInput *TI) {
 #pragma omp single
             n_omp_threads = omp_get_num_threads();
     }
-        
-    const bool debug = TI->debug;
-    const int n_bodies = TI->nBodies;
-    body *all_bodies = TI->bodies;
 
     if (debug && self == 0) {
         printf("Total number of bodies: %d\n", n_bodies);
