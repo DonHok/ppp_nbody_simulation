@@ -75,9 +75,8 @@ inline static void compute_acceleration_opt(const body *bodies_i, const body *bo
                                             long double *ax, long double *ay) {
     long double delta_x = bodies_j[j].x - bodies_i[i].x;
     long double delta_y = bodies_j[j].y - bodies_i[i].y;
-    const long double eucl = sqrtl(delta_x * delta_x + delta_y * delta_y);
     // writing the statement explicit performs way faster
-    long double r3 = eucl * eucl * eucl;
+    long double r3 = ( delta_x * delta_x + delta_y * delta_y) * sqrtl( delta_x * delta_x + delta_y * delta_y);
     *ax = (delta_x / r3);
     *ay = (delta_y / r3);
 }
