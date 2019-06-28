@@ -316,6 +316,7 @@ inline static void perform_simulation_local(int n_steps, int imgStep, body *bodi
 
         c_initialize_accelerations(a_xs, a_ys, n_to_simulate);
 //schedule(static,(n_to_simulate / n_omp_threads) * 2) for whatever reason changing the schedule decreases the performance by 50%
+//very likely computation here is relatively fast so worse caching behavior has a bigger impact on the performance than better workload distribution
 #pragma omp parallel for reduction(+:a_xs[:n_to_simulate]) reduction(+:a_ys[:n_to_simulate])
         for (int i = start_index_to_simulate; i < end_index_to_simulate; ++i) {
             // As only buffer space required to calculate local accelerations is allocated
@@ -326,7 +327,6 @@ inline static void perform_simulation_local(int n_steps, int imgStep, body *bodi
             // single loop
             compute_inner_loop(bodies, bodies, i, 0, start_index_to_simulate, a_xs, a_ys, idx_i);
 
-            // No schedule required
             for (int j = i; j < end_index_to_simulate - 1; ++j) {
                 long double ax, ay;
                 const int idx_j = j + 1 - start_index_to_simulate;
@@ -592,6 +592,9 @@ void compute_parallel(struct TaskInput *TI) {
         perform_simulation_local(TI->nSteps, TI->imageStep, all_bodies, n_bodies, debug, TI->deltaT,
                                  sendcnts, displs, self, n_omp_threads);
     } else if (TI->approxSurrogate) {
+        // Send complete body. Sending the mass would not be required however only very low amount of data
+        // is actually sent(very likely fits into one single tcp packet in all realistic use cases)
+        // so any additional case distinction to prevent the mass from being sent would only create more overhead 
         MPI_Datatype PPP_SURROGATE;
         MPI_Type_contiguous(5, MPI_LONG_DOUBLE, &PPP_SURROGATE);
         MPI_Type_commit(&PPP_SURROGATE);
